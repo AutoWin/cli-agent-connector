@@ -1,0 +1,158 @@
+{
+  "defaultAgent": "codex",
+  "agents": [
+    {
+      "name": "codex",
+      "persona": "Senior coding agent focused on safe, scoped implementation.",
+      "driver": "acp-proxy",
+      "command": "npx",
+      "args": ["-y", "@zed-industries/codex-acp"],
+      "env": {
+        "OPENAI_API_KEY": "${env:OPENAI_API_KEY}"
+      },
+      "auth": {
+        "login": {
+          "command": "codex",
+          "args": ["login"],
+          "timeoutMs": 600000
+        },
+        "deviceLogin": {
+          "command": "codex",
+          "args": ["login", "--device-auth"],
+          "timeoutMs": 600000
+        },
+        "logout": {
+          "command": "codex",
+          "args": ["logout"],
+          "timeoutMs": 120000
+        },
+        "successPatterns": ["logged in", "authenticated", "success", "complete"],
+        "loggedInPatterns": ["logged in", "authenticated", "signed in"],
+        "loggedOutPatterns": ["not logged in", "logged out", "not authenticated"]
+      },
+      "priority": 10,
+      "enabled": true,
+      "capabilities": ["code", "diff", "shell", "mcp"],
+      "costHint": 3
+    },
+    {
+      "name": "gemini",
+      "persona": "Fallback coding agent for implementation and broad codebase analysis.",
+      "driver": "acp-proxy",
+      "command": "npx",
+      "args": ["-y", "@google/gemini-cli", "--acp", "--skip-trust"],
+      "env": {
+        "GEMINI_API_KEY": "${env:GEMINI_API_KEY}"
+      },
+      "auth": {
+        "login": {
+          "command": "agy",
+          "args": [],
+          "timeoutMs": 600000,
+          "interactive": true
+        },
+        "successPatterns": ["authenticated", "signed in", "login", "ready"],
+        "loggedInPatterns": ["authenticated", "signed in", "logged in"],
+        "loggedOutPatterns": ["not authenticated", "not signed in", "login required"]
+      },
+      "priority": 20,
+      "enabled": false,
+      "capabilities": ["code", "shell", "mcp"],
+      "costHint": 2
+    },
+    {
+      "name": "antigravity",
+      "persona": "Google Antigravity CLI agent for code tasks through print-mode execution.",
+      "driver": "stdio-text",
+      "command": "agy",
+      "args": ["--print", "{prompt}", "--print-timeout", "10m"],
+      "env": {},
+      "auth": {
+        "login": {
+          "command": "agy",
+          "args": [],
+          "timeoutMs": 600000,
+          "interactive": true
+        },
+        "successPatterns": ["authenticated", "signed in", "login", "ready"],
+        "loggedInPatterns": ["authenticated", "signed in", "logged in"],
+        "loggedOutPatterns": ["not authenticated", "not signed in", "login required"]
+      },
+      "priority": 30,
+      "enabled": false,
+      "capabilities": ["code", "shell"],
+      "costHint": 2,
+      "defaultModel": "gemini-3.5-flash-medium",
+      "models": [
+        {
+          "id": "gemini-3.5-flash-medium",
+          "label": "Gemini 3.5 Flash (Medium)",
+          "args": ["--model", "Gemini 3.5 Flash (Medium)"],
+          "costHint": 2
+        },
+        {
+          "id": "gemini-3.5-flash-high",
+          "label": "Gemini 3.5 Flash (High)",
+          "args": ["--model", "Gemini 3.5 Flash (High)"],
+          "costHint": 3
+        },
+        {
+          "id": "gemini-3.5-flash-low",
+          "label": "Gemini 3.5 Flash (Low)",
+          "args": ["--model", "Gemini 3.5 Flash (Low)"],
+          "costHint": 1
+        },
+        {
+          "id": "gemini-3.1-pro-low",
+          "label": "Gemini 3.1 Pro (Low)",
+          "args": ["--model", "Gemini 3.1 Pro (Low)"],
+          "costHint": 3
+        },
+        {
+          "id": "gemini-3.1-pro-high",
+          "label": "Gemini 3.1 Pro (High)",
+          "args": ["--model", "Gemini 3.1 Pro (High)"],
+          "costHint": 4
+        },
+        {
+          "id": "claude-sonnet-4.6-thinking",
+          "label": "Claude Sonnet 4.6 (Thinking)",
+          "args": ["--model", "Claude Sonnet 4.6 (Thinking)"],
+          "costHint": 4
+        },
+        {
+          "id": "claude-opus-4.6-thinking",
+          "label": "Claude Opus 4.6 (Thinking)",
+          "args": ["--model", "Claude Opus 4.6 (Thinking)"],
+          "costHint": 5
+        },
+        {
+          "id": "gpt-oss-120b-medium",
+          "label": "GPT-OSS 120B (Medium)",
+          "args": ["--model", "GPT-OSS 120B (Medium)"],
+          "costHint": 2
+        }
+      ]
+    }
+  ],
+  "failover": {
+    "mode": "ask",
+    "triggers": ["quota", "rate_limit", "context", "model_unavailable"],
+    "contextTransfer": "summary_files",
+    "cooldownMs": 60000,
+    "maxRetriesPerAgent": 1
+  },
+  "capacityDetectors": {
+    "codex": {
+      "quota": ["quota exceeded", "insufficient_quota"],
+      "rate_limit": ["rate limit", "429"],
+      "context": ["context length", "context window", "too many tokens"],
+      "model_unavailable": ["model unavailable", "model_not_found"]
+    }
+  },
+  "state": {
+    "path": ".cli-agent-connector/state",
+    "retentionDays": 14,
+    "redactionRules": ["sk-[A-Za-z0-9_-]+", "ghp_[A-Za-z0-9_]+"]
+  }
+}

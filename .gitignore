@@ -1,0 +1,5 @@
+node_modules/
+dist/
+.cli-agent-connector/
+.antigravitycli/
+*.log

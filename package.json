@@ -1,0 +1,151 @@
+{
+  "name": "cli-agent-connector",
+  "version": "0.1.0",
+  "description": "Multi-agent CLI connector that exposes local coding agents to IDEs through ACP.",
+  "type": "module",
+  "bin": {
+    "cli-agent-connector": "./dist/cli.js"
+  },
+  "main": "./dist/extension.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test tests/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "vscode": "^1.101.0",
+    "node": ">=20"
+  },
+  "keywords": [
+    "acp",
+    "agent-client-protocol",
+    "cli-agent",
+    "vscode"
+  ],
+  "license": "Apache-2.0",
+  "activationEvents": [
+    "onView:cliAgentConnector.agents",
+    "onView:cliAgentConnector.chat",
+    "onCommand:cliAgentConnector.start",
+    "onCommand:cliAgentConnector.newSession",
+    "onCommand:cliAgentConnector.openChat",
+    "onCommand:cliAgentConnector.sendPrompt",
+    "onCommand:cliAgentConnector.cancel",
+    "onCommand:cliAgentConnector.switchAgent",
+    "onCommand:cliAgentConnector.login",
+    "onCommand:cliAgentConnector.deviceLogin",
+    "onCommand:cliAgentConnector.authStatus",
+    "onCommand:cliAgentConnector.logout",
+    "onCommand:cliAgentConnector.retry",
+    "onCommand:cliAgentConnector.inspectContext",
+    "onCommand:cliAgentConnector.openLogs"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "CLI Agent Connector",
+      "properties": {
+        "cliAgentConnector.command": {
+          "type": "string",
+          "default": "cli-agent-connector",
+          "description": "Command used by the VS Code extension to start the connector."
+        },
+        "cliAgentConnector.args": {
+          "type": "array",
+          "default": [
+            "serve",
+            "--config",
+            "${workspaceFolder}/cli-agent-connector.config.json"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Arguments used to start the connector. ${workspaceFolder} is expanded."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cliAgentConnector",
+          "title": "CLI Agents",
+          "icon": "resources/agent.svg"
+        }
+      ]
+    },
+    "views": {
+      "cliAgentConnector": [
+        {
+          "id": "cliAgentConnector.chat",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "cliAgentConnector.agents",
+          "name": "Agents"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "cliAgentConnector.start",
+        "title": "CLI Agents: Start Connector"
+      },
+      {
+        "command": "cliAgentConnector.newSession",
+        "title": "CLI Agents: New Session"
+      },
+      {
+        "command": "cliAgentConnector.openChat",
+        "title": "CLI Agents: Open Chat"
+      },
+      {
+        "command": "cliAgentConnector.sendPrompt",
+        "title": "CLI Agents: Send Prompt"
+      },
+      {
+        "command": "cliAgentConnector.cancel",
+        "title": "CLI Agents: Cancel Turn"
+      },
+      {
+        "command": "cliAgentConnector.switchAgent",
+        "title": "CLI Agents: Switch Agent"
+      },
+      {
+        "command": "cliAgentConnector.login",
+        "title": "CLI Agents: Login in Browser"
+      },
+      {
+        "command": "cliAgentConnector.deviceLogin",
+        "title": "CLI Agents: Device Code Login"
+      },
+      {
+        "command": "cliAgentConnector.authStatus",
+        "title": "CLI Agents: Check Auth Status"
+      },
+      {
+        "command": "cliAgentConnector.logout",
+        "title": "CLI Agents: Logout"
+      },
+      {
+        "command": "cliAgentConnector.retry",
+        "title": "CLI Agents: Retry Last Prompt"
+      },
+      {
+        "command": "cliAgentConnector.inspectContext",
+        "title": "CLI Agents: Inspect Context"
+      },
+      {
+        "command": "cliAgentConnector.openLogs",
+        "title": "CLI Agents: Open Logs"
+      }
+    ]
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "@types/vscode": "^1.101.0",
+    "typescript": "^5.8.3"
+  }
+}
