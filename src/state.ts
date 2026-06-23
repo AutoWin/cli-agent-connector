@@ -33,6 +33,8 @@ export class StateStore {
       mcpServers: input.mcpServers ?? [],
       activeAgent: input.activeAgent,
       activeModelByAgent: initialActiveModels(this.config, input.activeAgent),
+      modelSelectionByAgent: initialActiveModels(this.config, input.activeAgent),
+      mentorEvents: [],
       backendSessionIds: {},
       createdAt: now,
       updatedAt: now,

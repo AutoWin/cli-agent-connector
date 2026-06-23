@@ -61,6 +61,141 @@
       "costHint": 2
     },
     {
+      "name": "gemini-cli",
+      "persona": "Google Gemini CLI agent for headless code tasks with Gemini's local tool harness.",
+      "driver": "stdio-text",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@google/gemini-cli@latest",
+        "--skip-trust",
+        "--approval-mode",
+        "yolo",
+        "--prompt",
+        "{prompt}"
+      ],
+      "env": {
+        "GEMINI_API_KEY": "${env:GEMINI_API_KEY}"
+      },
+      "priority": 22,
+      "enabled": true,
+      "capabilities": ["code", "shell", "mcp"],
+      "costHint": 2,
+      "defaultModel": "gemini-2.5-flash",
+      "models": [
+        {
+          "id": "gemini-2.5-flash",
+          "label": "Gemini 2.5 Flash",
+          "benchmarkModelId": "gemini-2.5-flash-06-05-highthinking",
+          "args": ["--model", "gemini-2.5-flash"],
+          "costHint": 1
+        },
+        {
+          "id": "gemini-2.5-pro",
+          "label": "Gemini 2.5 Pro",
+          "benchmarkModelId": "gemini-2.5-pro-06-05-highthinking",
+          "args": ["--model", "gemini-2.5-pro"],
+          "costHint": 3
+        },
+        {
+          "id": "gemini-3-pro-preview",
+          "label": "Gemini 3 Pro Preview",
+          "benchmarkModelId": "gemini-3-pro-preview-11-2025-high",
+          "args": ["--model", "gemini-3-pro-preview"],
+          "costHint": 4
+        }
+      ]
+    },
+    {
+      "name": "command-code",
+      "persona": "Command Code CLI agent for taste-aware code tasks through headless print-mode execution.",
+      "driver": "stdio-text",
+      "command": "npx",
+      "args": [
+        "-y",
+        "command-code@latest",
+        "--trust",
+        "--skip-onboarding",
+        "--print",
+        "{prompt}",
+        "--max-turns",
+        "30"
+      ],
+      "env": {},
+      "auth": {
+        "login": {
+          "command": "npx",
+          "args": ["-y", "command-code@latest", "login"],
+          "timeoutMs": 600000
+        },
+        "status": {
+          "command": "npx",
+          "args": ["-y", "command-code@latest", "status"],
+          "timeoutMs": 120000
+        },
+        "logout": {
+          "command": "npx",
+          "args": ["-y", "command-code@latest", "logout"],
+          "timeoutMs": 120000
+        },
+        "successPatterns": [
+          "logged in",
+          "authenticated",
+          "success",
+          "complete",
+          "api key stored"
+        ],
+        "loggedInPatterns": [
+          "logged in",
+          "authenticated",
+          "signed in",
+          "api key stored",
+          "logged in as"
+        ],
+        "loggedOutPatterns": [
+          "not logged in",
+          "logged out",
+          "not authenticated",
+          "signed out"
+        ]
+      },
+      "priority": 25,
+      "enabled": true,
+      "capabilities": ["code", "shell"],
+      "costHint": 2,
+      "defaultModel": "deepseek/deepseek-v4-flash",
+      "models": [
+        {
+          "id": "deepseek/deepseek-v4-flash",
+          "label": "DeepSeek V4 Flash",
+          "benchmarkModelId": "deepseek-v4-flash",
+          "args": ["--model", "deepseek/deepseek-v4-flash"],
+          "costHint": 1
+        },
+        {
+          "id": "deepseek/deepseek-v4-pro",
+          "label": "DeepSeek V4 Pro",
+          "benchmarkModelId": "deepseek-v4-pro",
+          "args": ["--model", "deepseek/deepseek-v4-pro"],
+          "costHint": 3
+        },
+        {
+          "id": "moonshotai/Kimi-K2.7-Code",
+          "label": "Kimi K2.7 Code",
+          "benchmarkModelId": "kimi-k2-instruct",
+          "args": ["--model", "moonshotai/Kimi-K2.7-Code"],
+          "costHint": 2
+        },
+        {
+          "id": "gpt-5.3-codex",
+          "label": "GPT-5.3 Codex",
+          "benchmarkModelId": "gpt-5.3-codex-high",
+          "args": ["--model", "gpt-5.3-codex"],
+          "costHint": 4
+        }
+      ]
+    },
+    {
       "name": "antigravity",
       "persona": "Google Antigravity CLI agent for code tasks through print-mode execution.",
       "driver": "stdio-text",
@@ -93,6 +228,7 @@
         {
           "id": "gemini-3.5-flash-high",
           "label": "Gemini 3.5 Flash (High)",
+          "benchmarkModelId": "gemini-3.5-flash-high",
           "args": ["--model", "Gemini 3.5 Flash (High)"],
           "costHint": 3
         },
@@ -117,18 +253,21 @@
         {
           "id": "claude-sonnet-4.6-thinking",
           "label": "Claude Sonnet 4.6 (Thinking)",
+          "benchmarkModelId": "claude-sonnet-4-6-thinking-auto-medium-effort",
           "args": ["--model", "Claude Sonnet 4.6 (Thinking)"],
           "costHint": 4
         },
         {
           "id": "claude-opus-4.6-thinking",
           "label": "Claude Opus 4.6 (Thinking)",
+          "benchmarkModelId": "claude-opus-4-6-thinking-auto-high-effort",
           "args": ["--model", "Claude Opus 4.6 (Thinking)"],
           "costHint": 5
         },
         {
           "id": "gpt-oss-120b-medium",
           "label": "GPT-OSS 120B (Medium)",
+          "benchmarkModelId": "gpt-oss-120b",
           "args": ["--model", "GPT-OSS 120B (Medium)"],
           "costHint": 2
         }
@@ -148,6 +287,33 @@
       "rate_limit": ["rate limit", "429"],
       "context": ["context length", "context window", "too many tokens"],
       "model_unavailable": ["model unavailable", "model_not_found"]
+    },
+    "gemini-cli": {
+      "quota": ["quota exceeded", "resource exhausted", "insufficient quota", "billing"],
+      "rate_limit": ["rate limit", "rate_limited", "too many requests", "429"],
+      "context": ["context length", "context window", "too many tokens", "maximum context"],
+      "model_unavailable": ["model unavailable", "model_not_found", "unknown model"]
+    },
+    "command-code": {
+      "quota": ["quota exceeded", "insufficient credits", "credit balance", "billing limit"],
+      "rate_limit": ["rate limit", "rate_limited", "too many requests", "429"],
+      "context": ["context length", "context window", "too many tokens", "maximum context"],
+      "model_unavailable": ["model unavailable", "model_not_found", "unknown model"]
+    }
+  },
+  "benchmarks": {
+    "livebench": {
+      "enabled": true,
+      "release": "2026-01-08",
+      "baseUrl": "https://raw.githubusercontent.com/LiveBench/livebench.github.io/main/public",
+      "cacheTtlMs": 86400000
+    }
+  },
+  "learning": {
+    "mentorContext": {
+      "enabled": true,
+      "minScoreGap": 5,
+      "maxChars": 4000
     }
   },
   "state": {

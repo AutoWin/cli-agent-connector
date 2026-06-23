@@ -29,6 +29,21 @@ const DEFAULT_STATE = {
   contextBudgetChars: 120_000
 };
 
+const DEFAULT_LIVEBENCH = {
+  enabled: true,
+  release: "2026-01-08",
+  baseUrl: "https://raw.githubusercontent.com/LiveBench/livebench.github.io/main/public",
+  cacheTtlMs: 24 * 60 * 60 * 1000
+};
+
+const DEFAULT_LEARNING = {
+  mentorContext: {
+    enabled: true,
+    minScoreGap: 5,
+    maxChars: 4000
+  }
+};
+
 const DEFAULT_DETECTORS = {
   quota: ["quota exceeded", "insufficient_quota", "credit balance", "billing limit"],
   rate_limit: ["rate limit", "rate_limited", "too many requests", "\\b429\\b"],
@@ -125,8 +140,15 @@ export async function validateConfig(configPath: string): Promise<ValidationResu
 
   const failoverRaw = asObject(parsed.failover);
   const stateRaw = asObject(parsed.state);
+  const livebenchRaw = asObject(asObject(parsed.benchmarks).livebench);
+  const learningRaw = asObject(parsed.learning);
+  const mentorRaw = asObject(learningRaw.mentorContext);
   const statePath = stringValue(stateRaw.path, DEFAULT_STATE.path);
   const configDir = dirname(absolutePath);
+  const livebenchRelease = stringValue(livebenchRaw.release, DEFAULT_LIVEBENCH.release);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(livebenchRelease)) {
+    errors.push(`benchmarks.livebench.release must use YYYY-MM-DD format.`);
+  }
 
   const config: ConnectorConfig = {
     defaultAgent: optionalString(parsed.defaultAgent),
@@ -147,6 +169,21 @@ export async function validateConfig(configPath: string): Promise<ValidationResu
       retentionDays: numberValue(stateRaw.retentionDays, DEFAULT_STATE.retentionDays),
       redactionRules: stringArray(stateRaw.redactionRules),
       contextBudgetChars: numberValue(stateRaw.contextBudgetChars, DEFAULT_STATE.contextBudgetChars)
+    },
+    benchmarks: {
+      livebench: {
+        enabled: booleanValue(livebenchRaw.enabled, DEFAULT_LIVEBENCH.enabled),
+        release: livebenchRelease,
+        baseUrl: stringValue(livebenchRaw.baseUrl, DEFAULT_LIVEBENCH.baseUrl).replace(/\/+$/, ""),
+        cacheTtlMs: numberValue(livebenchRaw.cacheTtlMs, DEFAULT_LIVEBENCH.cacheTtlMs)
+      }
+    },
+    learning: {
+      mentorContext: {
+        enabled: booleanValue(mentorRaw.enabled, DEFAULT_LEARNING.mentorContext.enabled),
+        minScoreGap: numberValue(mentorRaw.minScoreGap, DEFAULT_LEARNING.mentorContext.minScoreGap),
+        maxChars: numberValue(mentorRaw.maxChars, DEFAULT_LEARNING.mentorContext.maxChars)
+      }
     }
   };
 
@@ -340,6 +377,7 @@ function normalizeModels(value: unknown, agentName: string, errors: string[]): A
         id: id || `model-${index + 1}`,
         label: optionalString(raw.label),
         description: optionalString(raw.description),
+        benchmarkModelId: normalizeBenchmarkModelId(raw.benchmarkModelId, agentName, id || `models[${index}]`, errors),
         enabled: booleanValue(raw.enabled, true),
         costHint: typeof raw.costHint === "number" && Number.isFinite(raw.costHint) ? raw.costHint : undefined,
         args: stringArray(raw.args),
@@ -411,6 +449,17 @@ function stringValue(value: unknown, fallback: string): string {
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function normalizeBenchmarkModelId(value: unknown, agentName: string, modelId: string, errors: string[]): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    errors.push(`Agent ${agentName} model ${modelId} benchmarkModelId must be a string.`);
+    return undefined;
+  }
+  return value.trim() || undefined;
 }
 
 function numberValue(value: unknown, fallback: number): number {

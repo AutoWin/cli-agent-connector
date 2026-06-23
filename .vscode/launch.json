@@ -7,11 +7,15 @@
       "request": "launch",
       "args": [
         "--extensionDevelopmentPath=${workspaceFolder}",
-        "${workspaceFolder}"
+        // "${workspaceFolder}",
+        "/home/thanhhlv/Documents/ODOO/odoo-19.0"
       ],
       "outFiles": [
         "${workspaceFolder}/dist/**/*.js"
       ],
+      "env": {
+        "PATH": "/home/thanhhlv/.nvm/versions/node/v25.5.0/bin:${env:PATH}"
+      },
       "preLaunchTask": "npm: build"
     }
   ]

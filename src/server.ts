@@ -3,7 +3,7 @@ import { cwd as processCwd } from "node:process";
 import { AuthService } from "./auth.js";
 import { BackendFactory } from "./backends/factory.js";
 import { capacityKindToTrigger } from "./capacity.js";
-import { ConnectorConfig, LogicalSessionState, SwitchProposal } from "./types.js";
+import { AgentConfig, AgentModelConfig, ConnectorConfig, LogicalSessionState, MentorEvent, PromptAttachment, SwitchProposal } from "./types.js";
 import { AgentRouter } from "./router.js";
 import { StateStore } from "./state.js";
 import { appendMessage, buildHandoffSummary, estimateContextChars, maybeCompactSession } from "./handoff.js";
@@ -12,6 +12,7 @@ import { EventLogger, Metrics } from "./metrics.js";
 import { Redactor, truncateText } from "./redaction.js";
 import { assemblePromptWithAttachments, normalizePromptAttachments } from "./chat-utils.js";
 import { defaultModelIdForAgent, selectedModelForAgent } from "./config.js";
+import { inferLiveBenchCategory, LiveBenchModelChoice, LiveBenchService } from "./livebench.js";
 
 export class ConnectorServer {
   private readonly redactor: Redactor;
@@ -19,6 +20,7 @@ export class ConnectorServer {
   private readonly router: AgentRouter;
   private readonly auth: AuthService;
   private readonly backends: BackendFactory;
+  private readonly livebench: LiveBenchService;
   private readonly metrics = new Metrics();
   private readonly logger: EventLogger;
   private readonly activeTurns = new Map<string, AbortController>();
@@ -31,6 +33,7 @@ export class ConnectorServer {
     this.router = new AgentRouter(config);
     this.auth = new AuthService(config.agents, this.redactor);
     this.backends = new BackendFactory(config);
+    this.livebench = new LiveBenchService(config);
     this.logger = new EventLogger(config.state.path, this.redactor);
   }
 
@@ -76,6 +79,7 @@ export class ConnectorServer {
     peer.onRequest("session/cancel", async (params) => await this.cancel(params));
     peer.onRequest("sessions/list", async () => await this.store.listSessions());
     peer.onRequest("sessions/inspect", async (params) => await this.inspectSession(params));
+    peer.onRequest("sessions/rename", async (params) => await this.renameSession(params));
     peer.onRequest("sessions/export", async (params) => await this.exportSession(params));
     peer.onRequest("connector/agents/list", async () => this.publicAgentList());
     peer.onRequest("connector/agents/health", async () =>
@@ -90,6 +94,7 @@ export class ConnectorServer {
     peer.onRequest("connector/auth/status", async (params) => await this.runAuth("status", params));
     peer.onRequest("connector/auth/logout", async (params) => await this.runAuth("logout", params));
     peer.onRequest("connector/failover/approve", async (params) => await this.approveFailover(params));
+    peer.onRequest("connector/benchmarks/livebench/refresh", async () => await this.refreshLiveBench());
     peer.onRequest("connector/metrics", async () => this.metrics.snapshot());
     peer.onRequest("connector/debug/export", async (params) => await this.exportDebugBundle(params));
   }
@@ -126,6 +131,8 @@ export class ConnectorServer {
     const sessionId = stringField(record, "sessionId");
     const prompt = extractPromptText(record);
     const attachments = normalizePromptAttachments(record.attachments);
+    const mode = agentModeFromRecord(record);
+    const responseLanguage = responseLanguageFromRecord(record);
     if (!sessionId) {
       throw new Error("session/prompt requires sessionId.");
     }
@@ -137,7 +144,9 @@ export class ConnectorServer {
     }
 
     let session = maybeCompactSession(await this.store.getSession(sessionId), this.config);
-    session = await this.ensureActiveModel(session, session.activeAgent);
+    const category = inferLiveBenchCategory(prompt, attachments, mode);
+    session = ensureAutoTitle(session, prompt);
+    session = await this.resolveModelForPrompt(session, session.activeAgent, category);
     session = appendMessage(
       {
         ...session,
@@ -157,17 +166,24 @@ export class ConnectorServer {
     this.activeTurns.set(sessionId, controller);
     const startedAt = Date.now();
     const agentName = session.activeAgent;
+    const mentor = await this.createMentorGuidance(session, agentName, category, prompt, attachments, mode, controller.signal);
+    session = mentor.session;
+    const studentPrompt = mentor.guidance ? withMentorGuidance(prompt, mentor.guidance) : prompt;
     const backendSessionId = await this.ensureBackendSession(session, agentName).then(
       (updated) => updated.backendSessionIds[agentName]
     );
+    session = await this.store.getSession(sessionId);
     const backend = this.backends.get(this.router.getAgent(agentName)!);
     let agentOutput = "";
 
-    const backendPrompt = assemblePromptWithAttachments(prompt, attachments);
+    const backendPrompt = assemblePromptWithAttachments(applyResponseLanguage(applyAgentMode(studentPrompt, mode), responseLanguage), attachments);
 
     await this.logger.log("prompt_started", {
       sessionId,
       agent: agentName,
+      mode,
+      responseLanguage,
+      livebenchCategory: category,
       model: session.activeModelByAgent?.[agentName],
       estimatedContextChars: estimateContextChars(session, backendPrompt)
     });
@@ -338,37 +354,51 @@ export class ConnectorServer {
     if (!agent) {
       throw new Error(`Unknown agent: ${agentName}`);
     }
-    const model = agent.models?.find((item) => item.id === modelId && item.enabled);
-    if (!model) {
+    const auto = modelId === "__auto__";
+    const model = auto ? undefined : agent.models?.find((item) => item.id === modelId && item.enabled);
+    if (!auto && !model) {
       throw new Error(`Agent ${agentName} does not support enabled model "${modelId}".`);
     }
     let session = await this.store.getSession(sessionId);
     if (session.currentTurnState !== "idle") {
       throw new Error("Cannot switch model while a turn is running.");
     }
+    const resolvedModelId = auto
+      ? session.activeModelByAgent?.[agentName] ?? defaultModelIdForAgent(agent)
+      : modelId;
     const activeModelByAgent = {
       ...(session.activeModelByAgent ?? {}),
-      [agentName]: modelId
+      ...(resolvedModelId ? { [agentName]: resolvedModelId } : {})
+    };
+    const modelSelectionByAgent = {
+      ...(session.modelSelectionByAgent ?? {}),
+      [agentName]: auto ? "__auto__" : modelId
     };
     const backendSessionIds = { ...session.backendSessionIds };
-    delete backendSessionIds[agentName];
+    if (!auto) {
+      delete backendSessionIds[agentName];
+    }
     session = {
       ...session,
       activeModelByAgent,
+      modelSelectionByAgent,
       backendSessionIds
     };
-    await this.backends.dispose(agentName);
-    if (session.activeAgent === agentName) {
+    if (!auto) {
+      await this.backends.dispose(agentName);
+    }
+    if (!auto && session.activeAgent === agentName) {
       session = await this.ensureBackendSession(session, agentName);
       this.backends.release(agentName);
     } else {
       await this.store.saveSession(session);
     }
-    await this.logger.log("model_switched", { sessionId, agent: agentName, model: modelId });
+    await this.logger.log("model_switched", { sessionId, agent: agentName, model: modelId, resolvedModel: resolvedModelId });
     return {
       sessionId,
       agentName,
-      activeModel: modelId,
+      modelSelection: auto ? "__auto__" : modelId,
+      activeModel: resolvedModelId,
       backendSessionId: session.backendSessionIds[agentName]
     };
   }
@@ -520,9 +550,23 @@ export class ConnectorServer {
     if (!agent?.models?.length) {
       return session;
     }
+    if (session.modelSelectionByAgent?.[agentName] === "__auto__") {
+      return session;
+    }
     const existing = selectedModelForAgent(agent, session);
     if (existing && session.activeModelByAgent?.[agentName] === existing.id) {
-      return session;
+      if (session.modelSelectionByAgent?.[agentName] === existing.id) {
+        return session;
+      }
+      const updated = {
+        ...session,
+        modelSelectionByAgent: {
+          ...(session.modelSelectionByAgent ?? {}),
+          [agentName]: existing.id
+        }
+      };
+      await this.store.saveSession(updated);
+      return updated;
     }
     const modelId = defaultModelIdForAgent(agent);
     if (!modelId) {
@@ -533,10 +577,237 @@ export class ConnectorServer {
       activeModelByAgent: {
         ...(session.activeModelByAgent ?? {}),
         [agentName]: modelId
+      },
+      modelSelectionByAgent: {
+        ...(session.modelSelectionByAgent ?? {}),
+        [agentName]: modelId
       }
     };
     await this.store.saveSession(updated);
     return updated;
+  }
+
+  private async resolveModelForPrompt(
+    session: LogicalSessionState,
+    agentName: string,
+    category: string
+  ): Promise<LogicalSessionState> {
+    const agent = this.router.getAgent(agentName);
+    if (!agent?.models?.length) {
+      return session;
+    }
+    if (session.modelSelectionByAgent?.[agentName] !== "__auto__") {
+      return await this.ensureActiveModel(session, agentName);
+    }
+
+    const choice = await this.livebench.chooseModel(agent, category);
+    const fallbackModelId = defaultModelIdForAgent(agent) ?? agent.models.find((model) => model.enabled)?.id;
+    const modelId = choice?.model.id ?? fallbackModelId;
+    if (!modelId) {
+      return session;
+    }
+    const previous = session.activeModelByAgent?.[agentName];
+    const backendSessionIds = { ...session.backendSessionIds };
+    if (previous && previous !== modelId) {
+      delete backendSessionIds[agentName];
+      await this.backends.dispose(agentName);
+    }
+    const updated = {
+      ...session,
+      activeModelByAgent: {
+        ...(session.activeModelByAgent ?? {}),
+        [agentName]: modelId
+      },
+      modelSelectionByAgent: {
+        ...(session.modelSelectionByAgent ?? {}),
+        [agentName]: "__auto__" as const
+      },
+      backendSessionIds
+    };
+    await this.store.saveSession(updated);
+    await this.logger.log("auto_model_resolved", {
+      sessionId: session.id,
+      agent: agentName,
+      category,
+      model: modelId,
+      score: choice?.rawScore,
+      adjustedScore: choice?.adjustedScore,
+      fallback: !choice
+    });
+    return updated;
+  }
+
+  private async createMentorGuidance(
+    session: LogicalSessionState,
+    studentAgentName: string,
+    category: string,
+    prompt: string,
+    attachments: PromptAttachment[],
+    mode: AgentMode,
+    signal: AbortSignal
+  ): Promise<{ session: LogicalSessionState; guidance?: string }> {
+    const mentorConfig = this.config.learning.mentorContext;
+    if (!mentorConfig.enabled || mentorConfig.maxChars <= 0) {
+      return { session };
+    }
+
+    const studentAgent = this.router.getAgent(studentAgentName);
+    const studentModel = studentAgent ? activeModelConfig(studentAgent, session) : undefined;
+    if (!studentAgent || !studentModel) {
+      return { session };
+    }
+
+    const [studentScore, teacherChoice] = await Promise.all([
+      this.livebench.scoreForModel(studentModel, category),
+      this.livebench.bestConfiguredModel(category)
+    ]);
+    if (studentScore === undefined || !teacherChoice) {
+      return { session };
+    }
+    if (teacherChoice.agent.name === studentAgent.name && teacherChoice.model.id === studentModel.id) {
+      return { session };
+    }
+    const scoreGap = teacherChoice.rawScore - studentScore;
+    if (scoreGap < mentorConfig.minScoreGap) {
+      return { session };
+    }
+
+    try {
+      const guidance = await this.runMentorPrompt(teacherChoice, session, prompt, attachments, mode, signal);
+      if (!guidance) {
+        return { session };
+      }
+      const event: MentorEvent = {
+        at: new Date().toISOString(),
+        category,
+        teacherAgent: teacherChoice.agent.name,
+        teacherModel: teacherChoice.model.id,
+        studentAgent: studentAgent.name,
+        studentModel: studentModel.id,
+        teacherScore: teacherChoice.rawScore,
+        studentScore,
+        scoreGap,
+        guidance
+      };
+      const backendSessionIds = { ...session.backendSessionIds };
+      delete backendSessionIds[teacherChoice.agent.name];
+      const updated = {
+        ...session,
+        backendSessionIds,
+        mentorEvents: [...(session.mentorEvents ?? []), event].slice(-50)
+      };
+      await this.store.saveSession(updated);
+      this.peer?.notify("connector/mentor_context", {
+        ...event,
+        sessionId: session.id
+      });
+      await this.logger.log("mentor_context_created", {
+        sessionId: session.id,
+        category,
+        teacherAgent: event.teacherAgent,
+        teacherModel: event.teacherModel,
+        studentAgent: event.studentAgent,
+        studentModel: event.studentModel,
+        scoreGap
+      });
+      return { session: updated, guidance };
+    } catch (error) {
+      await this.logger.log("mentor_context_failed", {
+        sessionId: session.id,
+        category,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return { session };
+    }
+  }
+
+  private async runMentorPrompt(
+    choice: LiveBenchModelChoice,
+    session: LogicalSessionState,
+    prompt: string,
+    attachments: PromptAttachment[],
+    mode: AgentMode,
+    signal: AbortSignal
+  ): Promise<string | undefined> {
+    const maxChars = this.config.learning.mentorContext.maxChars;
+    const teacherSession: LogicalSessionState = {
+      ...session,
+      id: `${session.id}:mentor:${Date.now()}`,
+      activeAgent: choice.agent.name,
+      activeModelByAgent: {
+        ...(session.activeModelByAgent ?? {}),
+        [choice.agent.name]: choice.model.id
+      },
+      modelSelectionByAgent: {
+        ...(session.modelSelectionByAgent ?? {}),
+        [choice.agent.name]: choice.model.id
+      },
+      backendSessionIds: {},
+      currentTurnState: "running"
+    };
+    await this.backends.dispose(choice.agent.name);
+    const backend = this.backends.get(choice.agent);
+    let guidance = "";
+    try {
+      const backendSessionId = await backend.startSession(teacherSession);
+      const result = await backend.prompt({
+        session: teacherSession,
+        backendSessionId,
+        prompt: buildMentorPrompt(prompt, attachments, mode),
+        handoffSummary: session.handoffSummary,
+        signal,
+        onUpdate: (update) => {
+          const text = extractUpdateText(update.params);
+          if (text) {
+            guidance += text;
+          }
+        },
+        requestClient: async () => ({
+          outcome: "denied",
+          reason: "Mentor context is read-only and cannot call tools or modify state."
+        })
+      });
+      guidance ||= result.message ?? "";
+      return truncateText(guidance.trim(), maxChars);
+    } finally {
+      await this.backends.dispose(choice.agent.name);
+    }
+  }
+
+  private async refreshLiveBench(): Promise<unknown> {
+    const data = await this.livebench.refresh(true);
+    if (!data) {
+      return { enabled: false };
+    }
+    return {
+      enabled: true,
+      release: data.release,
+      source: data.source,
+      loadedAt: data.loadedAt,
+      modelCount: data.models.size,
+      categories: Object.keys(data.categories)
+    };
+  }
+
+  private async renameSession(params: unknown): Promise<unknown> {
+    const record = asRecord(params);
+    const id = stringField(record, "sessionId") ?? stringField(record, "id");
+    const title = sanitizeSessionTitle(stringField(record, "title") ?? "", 64);
+    if (!id || !title) {
+      throw new Error("sessions/rename requires sessionId and title.");
+    }
+    const session = await this.store.getSession(id);
+    const updated = {
+      ...session,
+      title,
+      titleSource: "manual" as const
+    };
+    await this.store.saveSession(updated);
+    return {
+      sessionId: id,
+      title,
+      titleSource: updated.titleSource
+    };
   }
 
   private async inspectSession(params: unknown): Promise<unknown> {
@@ -585,6 +856,7 @@ export class ConnectorServer {
         id: model.id,
         label: model.label,
         description: model.description,
+        benchmarkModelId: model.benchmarkModelId,
         enabled: model.enabled,
         costHint: model.costHint
       })),
@@ -617,6 +889,7 @@ export class ConnectorServer {
         models: agent.models?.map((model) => ({
           id: model.id,
           label: model.label,
+          benchmarkModelId: model.benchmarkModelId,
           enabled: model.enabled,
           costHint: model.costHint,
           args: model.args,
@@ -636,7 +909,9 @@ export class ConnectorServer {
         path: this.config.state.path,
         retentionDays: this.config.state.retentionDays,
         contextBudgetChars: this.config.state.contextBudgetChars
-      }
+      },
+      benchmarks: this.config.benchmarks,
+      learning: this.config.learning
     };
   }
 }
@@ -692,6 +967,130 @@ function extractTextRecursive(value: unknown): string {
 
 function extractUpdateText(value: unknown): string {
   return extractTextRecursive(value);
+}
+
+type AgentMode = "agent" | "ask" | "plan";
+type ResponseLanguage = "auto" | "en" | "vi";
+
+function agentModeFromRecord(record: Record<string, unknown>): AgentMode {
+  return record.mode === "ask" || record.mode === "plan" ? record.mode : "agent";
+}
+
+function responseLanguageFromRecord(record: Record<string, unknown>): ResponseLanguage {
+  return record.responseLanguage === "en" || record.responseLanguage === "vi" ? record.responseLanguage : "auto";
+}
+
+function applyAgentMode(prompt: string, mode: AgentMode): string {
+  if (mode === "ask") {
+    return [
+      "Agent mode: Ask.",
+      "Answer the user's question directly. You may inspect or reason from provided context, but do not modify files, run write actions, apply patches, or execute state-changing commands. If a fix is needed, describe it instead of making it.",
+      "",
+      prompt
+    ].join("\n");
+  }
+  if (mode === "plan") {
+    return [
+      "Agent mode: Plan.",
+      "Create a concise implementation plan only. Do not modify files, run write actions, apply patches, or execute state-changing commands. Include assumptions, risks, and verification steps when useful.",
+      "",
+      prompt
+    ].join("\n");
+  }
+  return prompt;
+}
+
+function applyResponseLanguage(prompt: string, responseLanguage: ResponseLanguage): string {
+  if (responseLanguage === "en") {
+    return ["Response language: English.", "Write the final response in English.", "", prompt].join("\n");
+  }
+  if (responseLanguage === "vi") {
+    return ["Response language: Vietnamese.", "Write the final response in Vietnamese.", "", prompt].join("\n");
+  }
+  return prompt;
+}
+
+function ensureAutoTitle(session: LogicalSessionState, prompt: string): LogicalSessionState {
+  if (session.title || session.titleSource === "manual" || session.transcript.length > 0) {
+    return session;
+  }
+  const title = autoSessionTitle(prompt);
+  return title
+    ? {
+        ...session,
+        title,
+        titleSource: "auto"
+      }
+    : session;
+}
+
+function autoSessionTitle(prompt: string): string | undefined {
+  const clean = sanitizeSessionTitle(
+    prompt
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/[`*_>#~\[\](){}]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim(),
+    120
+  );
+  if (!clean) {
+    return undefined;
+  }
+  return sanitizeSessionTitle(clean.split(/\s+/).slice(0, 10).join(" "), 64);
+}
+
+function sanitizeSessionTitle(title: string, maxChars: number): string {
+  return title
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxChars)
+    .trim();
+}
+
+function withMentorGuidance(prompt: string, guidance: string): string {
+  return [
+    "Mentor guidance from stronger model:",
+    truncateText(guidance, 4000),
+    "",
+    "Use the guidance only as private strategy context. Do not mention it unless it is directly useful to the user.",
+    "",
+    prompt
+  ].join("\n");
+}
+
+function buildMentorPrompt(prompt: string, attachments: PromptAttachment[], mode: AgentMode): string {
+  const attachmentSummary = attachments.length
+    ? attachments
+        .map((attachment) =>
+          [
+            `- ${attachment.kind}: ${attachment.label}${attachment.path ? ` (${attachment.path})` : ""}`,
+            attachment.content ? truncateText(attachment.content, 800) : undefined
+          ]
+            .filter(Boolean)
+            .join("\n")
+        )
+        .join("\n")
+    : "No attachments.";
+  return [
+    "You are mentoring a weaker model for one turn.",
+    "Do not modify files, run commands, request permissions, or produce final user-facing prose.",
+    "Write concise private guidance only: strategy summary, likely pitfalls, and a compact answer sketch.",
+    "Keep it actionable and under 800 words.",
+    "",
+    `Student mode: ${mode}.`,
+    "",
+    "Attachments:",
+    attachmentSummary,
+    "",
+    "User task:",
+    prompt
+  ].join("\n");
+}
+
+function activeModelConfig(agent: AgentConfig, session: LogicalSessionState): AgentModelConfig | undefined {
+  const modelId = session.activeModelByAgent?.[agent.name] ?? agent.defaultModel;
+  return agent.models?.find((model) => model.id === modelId && model.enabled);
 }
 
 function extractFileRefs(record: Record<string, unknown>): string[] {

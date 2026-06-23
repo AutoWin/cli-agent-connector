@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { ConnectorServer } from "../dist/server.js";
@@ -171,6 +171,118 @@ test("server switches configured stdio model and passes model args/env", async (
   await server.stop();
 });
 
+test("server persists auto model selection while resolving the active model per prompt", async () => {
+  const statePath = await mkdtemp(join(tmpdir(), "cac-state-auto-"));
+  await writeLiveBenchCache(
+    statePath,
+    [
+      "model,code_generation,code_completion,tablejoin,tablereformat",
+      "small-row,75,75,90,90",
+      "large-row,98,98,50,50"
+    ].join("\n")
+  );
+  const fakeText = resolve("tests/fixtures/fake-text-agent.mjs");
+  const fakeModelAgent = resolve("tests/fixtures/fake-model-agent.mjs");
+  const config = makeConfig(statePath, fakeText);
+  config.benchmarks.livebench.enabled = true;
+  config.learning.mentorContext.enabled = false;
+  config.agents[0] = {
+    ...config.agents[0],
+    command: process.execPath,
+    args: [fakeModelAgent, "{prompt}"],
+    defaultModel: "small",
+    models: [
+      {
+        id: "small",
+        label: "Small",
+        benchmarkModelId: "small-row",
+        enabled: true,
+        args: ["--model", "small-model"],
+        env: {},
+        costHint: 1
+      },
+      {
+        id: "large",
+        label: "Large",
+        benchmarkModelId: "large-row",
+        enabled: true,
+        args: ["--model", "large-model"],
+        env: {},
+        costHint: 2
+      }
+    ]
+  };
+
+  const { server, client } = await startInProcessServer(config);
+  const created = await client.request("session/new", { cwd: process.cwd() });
+  await client.request("connector/model/switch", { sessionId: created.sessionId, agentName: "primary", modelId: "__auto__" });
+  await client.request("session/prompt", { sessionId: created.sessionId, prompt: "Implement a TypeScript parser and tests" });
+
+  const inspected = await client.request("sessions/inspect", { sessionId: created.sessionId });
+  assert.equal(inspected.modelSelectionByAgent.primary, "__auto__");
+  assert.equal(inspected.activeModelByAgent.primary, "large");
+  assert.match(inspected.transcript.at(-1).text, /large-model/);
+
+  await server.stop();
+});
+
+test("server creates mentor context only when LiveBench score gap is large enough", async () => {
+  const statePath = await mkdtemp(join(tmpdir(), "cac-state-mentor-"));
+  await writeLiveBenchCache(
+    statePath,
+    ["model,code_generation,code_completion", "small-row,70,70", "large-row,92,92"].join("\n")
+  );
+  const fakeText = resolve("tests/fixtures/fake-text-agent.mjs");
+  const fakeModelAgent = resolve("tests/fixtures/fake-model-agent.mjs");
+  const config = makeConfig(statePath, fakeText);
+  config.benchmarks.livebench.enabled = true;
+  config.learning.mentorContext.enabled = true;
+  config.learning.mentorContext.minScoreGap = 5;
+  config.learning.mentorContext.maxChars = 1200;
+  config.agents[0] = {
+    ...config.agents[0],
+    command: process.execPath,
+    args: [fakeModelAgent, "{prompt}"],
+    defaultModel: "small",
+    models: [
+      {
+        id: "small",
+        label: "Small",
+        benchmarkModelId: "small-row",
+        enabled: true,
+        args: ["--model", "small-model"],
+        env: {},
+        costHint: 1
+      },
+      {
+        id: "large",
+        label: "Large",
+        benchmarkModelId: "large-row",
+        enabled: true,
+        args: ["--model", "large-model"],
+        env: {},
+        costHint: 3
+      }
+    ]
+  };
+
+  const { server, client } = await startInProcessServer(config);
+  const events = [];
+  client.onNotification("connector/mentor_context", (params) => events.push(params));
+
+  const created = await client.request("session/new", { cwd: process.cwd() });
+  await client.request("session/prompt", { sessionId: created.sessionId, prompt: "Implement a small parser" });
+  const inspected = await client.request("sessions/inspect", { sessionId: created.sessionId });
+
+  assert.equal(events.length, 1);
+  assert.equal(inspected.mentorEvents.length, 1);
+  assert.equal(inspected.mentorEvents[0].teacherModel, "large");
+  assert.equal(inspected.mentorEvents[0].studentModel, "small");
+  assert.match(inspected.transcript.at(-1).text, /Mentor guidance from stronger model/);
+
+  await server.stop();
+});
+
 test("ACP backend restarts with selected model after model switch", async () => {
   const statePath = await mkdtemp(join(tmpdir(), "cac-state-"));
   const fakeText = resolve("tests/fixtures/fake-text-agent.mjs");
@@ -204,6 +316,30 @@ test("ACP backend restarts with selected model after model switch", async () => 
 
   const inspected = await client.request("sessions/inspect", { sessionId: created.sessionId });
   assert.equal(inspected.activeModelByAgent["primary-acp"], "m2");
+
+  await server.stop();
+});
+
+test("server auto-generates and manually renames session titles", async () => {
+  const statePath = await mkdtemp(join(tmpdir(), "cac-state-title-"));
+  const fakeText = resolve("tests/fixtures/fake-text-agent.mjs");
+  const config = makeConfig(statePath, fakeText);
+  const { server, client } = await startInProcessServer(config);
+
+  const created = await client.request("session/new", { cwd: process.cwd() });
+  await client.request("session/prompt", {
+    sessionId: created.sessionId,
+    prompt: "Please implement session title generation from the first user prompt"
+  });
+  let inspected = await client.request("sessions/inspect", { sessionId: created.sessionId });
+  assert.equal(inspected.title.length <= 64, true);
+  assert.match(inspected.title, /^Please implement session title generation from the first user/);
+  assert.equal(inspected.titleSource, "auto");
+
+  await client.request("sessions/rename", { sessionId: created.sessionId, title: "Manual QA title" });
+  inspected = await client.request("sessions/inspect", { sessionId: created.sessionId });
+  assert.equal(inspected.title, "Manual QA title");
+  assert.equal(inspected.titleSource, "manual");
 
   await server.stop();
 });
@@ -247,6 +383,20 @@ async function startInProcessServer(config) {
   client.start();
   await client.request("initialize", {});
   return { server, client };
+}
+
+async function writeLiveBenchCache(statePath, tableCsv) {
+  const dir = join(statePath, "benchmarks", "livebench");
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "table_2026_01_08.csv"), tableCsv, "utf8");
+  await writeFile(
+    join(dir, "categories_2026_01_08.json"),
+    JSON.stringify({
+      Coding: ["code_generation", "code_completion"],
+      "Data Analysis": ["tablejoin", "tablereformat"]
+    }),
+    "utf8"
+  );
 }
 
 function makeConfig(statePath, fakeText) {
@@ -293,6 +443,21 @@ function makeConfig(statePath, fakeText) {
         rate_limit: ["rate limit"],
         context: ["context window"],
         model_unavailable: ["model unavailable"]
+      }
+    },
+    benchmarks: {
+      livebench: {
+        enabled: false,
+        release: "2026-01-08",
+        baseUrl: "https://raw.githubusercontent.com/LiveBench/livebench.github.io/main/public",
+        cacheTtlMs: 86400000
+      }
+    },
+    learning: {
+      mentorContext: {
+        enabled: false,
+        minScoreGap: 5,
+        maxChars: 4000
       }
     },
     state: {

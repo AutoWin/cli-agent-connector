@@ -31,6 +31,7 @@ export interface AgentModelConfig {
   id: string;
   label?: string;
   description?: string;
+  benchmarkModelId?: string;
   enabled: boolean;
   costHint?: number;
   args: string[];
@@ -100,12 +101,35 @@ export interface StateConfig {
   contextBudgetChars: number;
 }
 
+export interface LiveBenchConfig {
+  enabled: boolean;
+  release: string;
+  baseUrl: string;
+  cacheTtlMs: number;
+}
+
+export interface BenchmarksConfig {
+  livebench: LiveBenchConfig;
+}
+
+export interface MentorContextConfig {
+  enabled: boolean;
+  minScoreGap: number;
+  maxChars: number;
+}
+
+export interface LearningConfig {
+  mentorContext: MentorContextConfig;
+}
+
 export interface ConnectorConfig {
   defaultAgent?: string;
   agents: AgentConfig[];
   failover: FailoverConfig;
   capacityDetectors: Record<string, CapacityDetectorConfig>;
   state: StateConfig;
+  benchmarks: BenchmarksConfig;
+  learning: LearningConfig;
 }
 
 export interface ValidationResult {
@@ -150,13 +174,32 @@ export interface RoutingEvent {
   reason: string;
 }
 
+export type ModelSelection = string | "__auto__";
+
+export interface MentorEvent {
+  at: string;
+  category: string;
+  teacherAgent: string;
+  teacherModel?: string;
+  studentAgent: string;
+  studentModel?: string;
+  teacherScore: number;
+  studentScore: number;
+  scoreGap: number;
+  guidance: string;
+}
+
 export interface LogicalSessionState {
   id: string;
+  title?: string;
+  titleSource?: "auto" | "manual";
   cwd: string;
   additionalDirectories: string[];
   mcpServers: unknown[];
   activeAgent: string;
   activeModelByAgent?: Record<string, string>;
+  modelSelectionByAgent?: Record<string, ModelSelection>;
+  mentorEvents?: MentorEvent[];
   backendSessionIds: Record<string, string>;
   createdAt: string;
   updatedAt: string;
